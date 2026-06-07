@@ -1,0 +1,373 @@
+==============================================================
+  SHINE GITOPS PROJECT - ASSESSMENT NOTES (All 6 Tasks)
+==============================================================
+Repo: https://github.com/Msocial123/Shine-GitOps-Project.git
+Stack: Node.js + MongoDB + Docker + Kubernetes (EKS) + ArgoCD + Datadog + Claude AI
+App: Retail web app (register, login, OTP, cart, purchase) running on port 3130
+
+==============================================================
+TASK 1: CI - GitHub Actions (.github/workflows/docker-image.yml)
+==============================================================
+-- What the file already does (DO NOT CHANGE) --
+  Trigger     : push to main branch
+  Step 1      : Checkout code (actions/checkout@v4)
+  Step 2      : Setup Docker Buildx
+  Step 3      : Login to Docker Hub using secrets (DOCKER_USERNAME, DOCKER_PASSWORD)
+  Step 4      : Build & push image → muralisocial123/aws-retail-app:v1.4.0
+  Step 5      : Install docker-compose
+  Step 6      : docker-compose pull + up -d (runs nodejs + mongodb locally)
+
+-- Docx Requirements covered --
+  [✓] Source Code Integration    : on push → triggers pipeline
+  [✓] Application Build Process  : checkout → docker build (Dockerfile: node:18, npm install, EXPOSE 3130)
+  [✓] Container Image Automation : docker/build-push-action → tags image → pushes to Docker Hub
+  [✓] Security                   : DOCKER_USERNAME & DOCKER_PASSWORD stored as GitHub Secrets (never hardcoded)
+  [✓] Authenticate with registry : docker/login-action@v3 with secrets
+  [✓] Image tagging strategy     : tag = v1.4.0 (fixed version tag)
+
+-- Docx says also add (for full marks, note these for explanation) --
+  [→] Pull request trigger:
+        on:
+          pull_request:
+            branches: [main]
+  [→] Feature branch trigger:
+        on:
+          push:
+            branches: [main, 'feature/**']
+  [→] Testing: npm test step (currently not in workflow but package.json has test script)
+  [→] Image scanning: add trivy action after build (trivy image muralisocial123/aws-retail-app:v1.4.0)
+  [→] Code validation: npm install already validates dependencies
+
+-- Dockerfile (existing, do not change) --
+  FROM node:18
+  WORKDIR /Capsule
+  COPY package*.json ./
+  RUN npm install
+  COPY . .
+  EXPOSE 3130
+  CMD ["npm", "start"]
+
+-- docker-compose.yaml (existing, do not change) --
+  nodejs service: builds from Dockerfile, port 3130, env vars from .env
+  mongodb service: mongo:latest, port 27017, volume ./data:/data/db
+
+==============================================================
+TASK 2: EKS Cluster Setup (Run these commands on AWS CLI)
+==============================================================
+-- Docx Requirements --
+  [✓] Create EKS Cluster
+  [✓] Configure worker nodes
+  [✓] Configure namespaces
+  [✓] Configure Kubernetes access control
+  [✓] Prepare deployment environment
+  [✓] Scalability, Security, HA
+
+-- Commands --
+Step 1: Install eksctl (if not installed)
+  curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp
+  sudo mv /tmp/eksctl /usr/local/bin
+
+Step 2: Create EKS Cluster
+  eksctl create cluster \
+    --name shine-cluster \
+    --region us-east-1 \
+    --nodegroup-name shine-nodes \
+    --node-type t3.medium \
+    --nodes 2 \
+    --nodes-min 1 \
+    --nodes-max 3 \
+    --managed
+
+Step 3: Update kubeconfig (access cluster)
+  aws eks update-kubeconfig --name shine-cluster --region us-east-1
+
+Step 4: Create namespaces
+  kubectl create namespace retail          ← app goes here
+  kubectl create namespace argocd          ← ArgoCD installed here
+  kubectl create namespace argo-rollouts   ← Argo Rollouts installed here
+
+Step 5: RBAC - create service account
+  kubectl create serviceaccount retail-sa -n retail
+  kubectl create clusterrolebinding retail-admin \
+    --clusterrole=cluster-admin \
+    --serviceaccount=retail:retail-sa
+
+Step 6: Verify cluster
+  kubectl get nodes
+  kubectl get ns
+
+-- Scalability  : --nodes-min 1 --nodes-max 3 → Cluster Autoscaler handles scale-up/down
+-- Security     : IAM roles for node groups, RBAC enabled by default on EKS
+-- HA           : EKS managed nodes spread across multiple AZs automatically
+
+==============================================================
+TASK 3: GitOps CD - ArgoCD (files already exist in Retail-chart/)
+==============================================================
+-- What's already in the project (DO NOT CHANGE) --
+  Retail-chart/Chart.yaml                          → Helm chart (retail-app v1.0.0)
+  Retail-chart/values.yaml                         → image: muralisocial123/aws-retail-app:latest, replicas: 2
+  templates/mongodb-deployment.yml                 → MongoDB Deployment, 2 replicas
+  templates/mongodb-service.yml                    → MongoDB ClusterIP service, port 27017
+  templates/userprofile-rollout.yml                → Argo Rollout with Blue-Green strategy
+  templates/usernode-service.yml                   → Active service (LoadBalancer) + Preview service (ClusterIP)
+  templates/userprofile-secret.yml                 → K8s Secret (SESSION_SECRET, EMAIL_USER, EMAIL_PASS)
+  templates/argo-application.yml                   → ArgoCD App pointing to this repo
+  templates/argo-rollouts-dashboard-service.yml    → Dashboard exposed on port 3100
+
+-- Docx Requirements covered by existing files --
+  [✓] Application manifests          : all in Retail-chart/templates/
+  [✓] Deployment YAML                : userprofile-rollout.yml (Argo Rollout)
+  [✓] Service configuration          : usernode-service.yml (active + preview)
+  [✓] Environment-based config       : values.yaml + userprofile-secret.yml
+  [✓] Connect with Git Repository    : argo-application.yml → repoURL: github.com/Msocial123/Shine-GitOps-Project
+  [✓] Track Kubernetes manifests     : path: Retail-chart
+  [✓] Detect changes + Sync state    : syncPolicy automated, selfHeal: true, prune: true
+  [✓] Blue-Green / Rollback strategy : Argo Rollouts with promote/undo commands
+
+-- ArgoCD Install Steps (from Argo-Deployment.docx) --
+  kubectl create namespace argocd
+  kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+  kubectl create ns retail
+
+  # Expose ArgoCD UI
+  kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+  kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+  # Get initial password and login
+  argocd admin initial-password -n argocd
+  argocd login <ARGOCD-LB-URL>:80
+  argocd account update-password   → password: Mur@li2024
+
+  # Register EKS cluster
+  kubectl config get-contexts -o name
+  argocd cluster add <context-name>
+  # Destination server: https://5D3C28B0D81696975478E3A174373019.gr7.us-east-2.eks.amazonaws.com
+
+-- Install Argo Rollouts --
+  kubectl create namespace argo-rollouts
+  kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+-- Deploy Helm Chart --
+  snap install helm --classic
+  helm install retail-release ./Retail-chart
+
+-- Deployment Validation --
+  kubectl get applications -n argocd               ← check sync status
+  kubectl get rollout -n retail                     ← check rollout health
+  kubectl get pods -n retail                        ← check all pods running
+  kubectl get svc -n retail                         ← check services
+  argocd app get userprofile-blue-green             ← full app status
+
+-- GitOps Operations (update via git) --
+  # Change image tag in values.yaml → git commit → ArgoCD auto-detects → syncs → rolls out new version
+  # Promote Blue-Green:
+    kubectl argo rollouts promote userprofile-rollout -n retail
+  # Rollback:
+    kubectl argo rollouts undo userprofile-rollout -n retail
+
+==============================================================
+TASK 4: Observability - Datadog on EKS
+==============================================================
+-- Docx Requirements --
+  [✓] Cluster health, node metrics, pod metrics, container performance
+  [✓] Application availability, response time, errors, performance bottlenecks
+  [✓] Container logs, application logs, Kubernetes event logs
+  [✓] Dashboards: app performance, K8s health, infrastructure utilization
+  [✓] Alerts: pod failures, high CPU, memory, app errors, service availability
+
+-- Install Datadog Agent via Helm --
+  helm repo add datadog https://helm.datadoghq.com
+  helm repo update
+
+  helm install datadog-agent datadog/datadog \
+    --set datadog.apiKey=<YOUR_DATADOG_API_KEY> \
+    --set datadog.logs.enabled=true \
+    --set datadog.logs.containerCollectAll=true \
+    --set datadog.apm.enabled=true \
+    --set datadog.processAgent.enabled=true \
+    --namespace default
+
+-- Verify --
+  kubectl get pods -l app=datadog-agent
+
+-- What it monitors automatically --
+  Infrastructure: node CPU, memory, disk, network
+  Kubernetes:     pod restarts, deployment status, events, resource limits
+  Application:    HTTP requests, response time, error rate (via APM)
+  Logs:           all container stdout/stderr collected centrally
+
+-- Dashboards to create in Datadog UI --
+  1. Kubernetes Overview    : pre-built template in Datadog → just enable
+  2. Application Performance: custom → widgets for response time + error rate
+  3. Infrastructure Health  : CPU%, memory%, disk%, network in/out
+
+-- Alerts to configure in Datadog --
+  Monitor → New Monitor:
+  - Pod CrashLoopBackOff     : kubernetes.containers.restarts > 5 → CRITICAL
+  - High CPU                 : system.cpu.user > 80%              → WARNING
+  - High Memory              : system.mem.pct_usable < 15%        → WARNING
+  - Application errors       : trace.servlet.request.errors > 0   → CRITICAL
+  - Service down             : synthetics monitor on app URL       → CRITICAL
+
+==============================================================
+TASK 5: AI-Powered Troubleshooting Agent (Claude AI)
+==============================================================
+-- Docx Requirements --
+  [✓] Log Collection from kubectl + events + Datadog
+  [✓] AI-Based Analysis using Claude
+  [✓] Understand log patterns, analyze failures, root causes, troubleshooting steps
+  [✓] Scenario 1: pod restarting
+  [✓] Scenario 2: latency increased
+  [✓] Scenario 3: deployment failed
+
+-- Simple AI Agent (Python concept) --
+
+  import anthropic, subprocess
+
+  def collect_logs(pod_name, namespace="retail"):
+      # Get pod logs (last 100 lines)
+      logs = subprocess.run(
+          ["kubectl", "logs", pod_name, "-n", namespace, "--tail=100"],
+          capture_output=True, text=True
+      ).stdout
+      # Get pod events and status
+      events = subprocess.run(
+          ["kubectl", "describe", "pod", pod_name, "-n", namespace],
+          capture_output=True, text=True
+      ).stdout
+      return logs, events
+
+  def ask_claude(logs, events, scenario):
+      client = anthropic.Anthropic(api_key="YOUR_API_KEY")
+      msg = client.messages.create(
+          model="claude-opus-4-5",
+          max_tokens=1024,
+          messages=[{
+              "role": "user",
+              "content": f"Kubernetes issue: {scenario}\n\nLogs:\n{logs}\n\nEvents:\n{events}\n\nFind root cause and suggest fix steps."
+          }]
+      )
+      return msg.content[0].text
+
+  # Run it
+  pod = "userprofile-rollout-abc123"
+  logs, events = collect_logs(pod)
+  print(ask_claude(logs, events, "pod keeps restarting"))
+
+-- Scenario 1: Pod CrashLoopBackOff (continuously restarting) --
+  Commands to run first:
+    kubectl get pods -n retail
+    kubectl describe pod <pod-name> -n retail    ← review pod events
+    kubectl logs <pod-name> -n retail --previous ← analyze previous crash logs
+  Claude AI analyzes:
+    → Missing env var / secret not found → fix: check userprofile-secret.yml
+    → OOMKilled → fix: increase memory limits in values.yaml
+    → Wrong image → fix: check image tag in values.yaml
+    → MongoDB connection refused → fix: check mongodb-deployment is running
+
+-- Scenario 2: Latency increased after deployment --
+  Commands to run first:
+    kubectl top pods -n retail                   ← analyze performance metrics
+    kubectl top nodes                            ← check node pressure
+    kubectl logs <pod-name> -n retail            ← review application traces/slow queries
+  Claude AI analyzes:
+    → MongoDB slow query → fix: add index or increase resources
+    → CPU throttling → fix: raise CPU limits in Helm values
+    → Memory pressure → fix: check for memory leak in server.js
+    → Too many replicas sharing same DB → fix: connection pooling
+
+-- Scenario 3: Deployment failed in Kubernetes --
+  Commands to run first:
+    kubectl rollout status rollout/userprofile-rollout -n retail  ← analyze deployment status
+    kubectl get events -n retail --sort-by=.lastTimestamp         ← review Kubernetes events
+    kubectl describe rollout userprofile-rollout -n retail
+  Claude AI analyzes:
+    → ImagePullBackOff → fix: check Docker Hub credentials, image name in values.yaml
+    → Quota exceeded → fix: request higher limits from cluster admin
+    → Invalid YAML/config → fix: helm lint ./Retail-chart before deploying
+    → Rollback: kubectl argo rollouts undo userprofile-rollout -n retail
+
+==============================================================
+TASK 6: Open Source AIOps Tools
+==============================================================
+-- Docx Requirements --
+  [✓] Event correlation
+  [✓] Log intelligence
+  [✓] Anomaly detection
+  [✓] Root cause analysis
+  [✓] Incident recommendations
+  [✓] Compare traditional vs AI-assisted
+
+-- Tools to evaluate --
+  1. Robusta     : Kubernetes-native, auto-collects pod failures, integrates with Claude/ChatGPT for RCA
+  2. OpenObserve : Open source Datadog alternative - logs, metrics, traces in one UI
+  3. Grafana+Loki: Grafana (dashboards) + Loki (log aggregation) - widely used, free
+  4. Keptn       : Event-driven auto-remediation (auto rollback on SLO breach)
+  5. Prometheus  : Metrics collection + alerting rules (most popular K8s monitoring)
+
+-- Comparison Table --
+  Feature                  | Traditional Monitoring   | AI-Assisted (AIOps)
+  -------------------------|--------------------------|--------------------
+  Log analysis             | Manual grep/search       | Automatic pattern detection
+  Alert noise              | High (many false alarms) | Low (correlated alerts)
+  Root cause finding       | Hours of manual work     | Minutes (Claude analyzes instantly)
+  Anomaly detection        | Static thresholds only   | ML-based dynamic thresholds
+  Incident recommendations | Team experience needed   | AI suggests steps automatically
+  MTTR (time to resolve)   | High                     | Significantly reduced
+
+-- Recommended Open Source Stack --
+  Prometheus  → metrics scraping from K8s
+  Grafana     → dashboards for metrics
+  Loki        → log aggregation (like Datadog logs)
+  Robusta     → K8s-native alerts + AI-powered RCA
+  Claude API  → deep log analysis and remediation advice
+
+==============================================================
+FINAL ARCHITECTURE FLOW (as required in docx)
+==============================================================
+
+  Developer
+      ↓ commits code
+  GitHub Repository (Shine-GitOps-Project)
+      ↓ push to main triggers
+  GitHub Actions CI Pipeline
+      ↓ builds & pushes image
+  Container Registry (Docker Hub: muralisocial123/aws-retail-app:v1.4.0)
+      ↓ image available → Helm values updated in repo
+  GitOps Repository (same repo, Retail-chart/ path)
+      ↓ ArgoCD watches repo
+  ArgoCD (namespace: argocd)
+      ↓ auto-sync + Argo Rollouts Blue-Green
+  Amazon EKS Cluster (namespace: retail)
+      ↓ pods running
+  Application Workloads (userprofile-rollout + mongodb-deployment)
+      ↓ metrics & logs collected
+  Datadog Monitoring (DaemonSet on every node)
+      ↓ alert fires on anomaly
+  AI Troubleshooting Agent (Python script)
+      ↓ collects kubectl logs + events + Datadog logs
+  Claude / AIOps Engine
+      → analyzes root cause → recommends fix → SRE team resolves
+
+==============================================================
+KEY PROJECT FILES SUMMARY (existing - DO NOT MODIFY)
+==============================================================
+FILE                                    WHAT IT DOES
+.github/workflows/docker-image.yml    → CI: build + push Docker image on push to main
+Dockerfile                            → node:18 base, npm install, port 3130, npm start
+docker-compose.yaml                   → local dev: nodejs app + mongodb together
+server.js                             → Express: register, login, OTP verify, cart, purchase, contact
+package.json                          → deps: express, mongoose, bcryptjs, nodemailer, connect-mongo
+.env                                  → MONGODB_URI, SESSION_SECRET, PORT, EMAIL_USER, EMAIL_PASS
+Retail-chart/Chart.yaml               → Helm chart: name=retail-app, version=1.0.0
+Retail-chart/values.yaml              → image, replicas, secrets (base64), service type
+templates/mongodb-deployment.yml      → MongoDB K8s Deployment (2 replicas)
+templates/mongodb-service.yml         → MongoDB ClusterIP Service port 27017
+templates/userprofile-rollout.yml     → Argo Rollout: Blue-Green, 2 replicas, image from values
+templates/usernode-service.yml        → userprofile-active-service (LB) + preview-service (ClusterIP)
+templates/userprofile-secret.yml      → K8s Secret with SESSION_SECRET, EMAIL_USER, EMAIL_PASS
+templates/argo-application.yml        → ArgoCD Application: auto-sync from GitHub to EKS retail ns
+templates/argo-rollouts-dashboard.yml → Argo Rollouts UI exposed via LoadBalancer port 3100
+Argo-Deployment.docx                  → Step-by-step ArgoCD install guide (kubectl commands)
+==============================================================

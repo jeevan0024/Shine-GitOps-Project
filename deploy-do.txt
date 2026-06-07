@@ -1,0 +1,109 @@
+==============================================================
+  SHINE GITOPS PROJECT - FULL DEPLOYMENT STEPS (PowerShell)
+==============================================================
+NOTE: All commands are single-line (PowerShell on Windows)
+Region: ap-south-2  |  Namespace: retail  |  Helm chart: Retail-chart/
+
+==============================================================
+PHASE 1 — Prerequisites Check
+==============================================================
+aws --version
+kubectl version --client
+eksctl version
+helm version
+
+==============================================================
+PHASE 2 — Create EKS Cluster
+==============================================================
+eksctl create cluster --name shine-cluster --region ap-south-2 --nodegroup-name shine-nodes --node-type t3.small --nodes 2 --nodes-min 1 --nodes-max 3 --managed
+
+-- Wait 15-20 mins until you see: "EKS cluster is ready" --
+
+-- If it fails / gets stuck, delete and retry --
+eksctl delete cluster --name shine-cluster --region ap-south-2
+
+==============================================================
+PHASE 3 — Connect kubectl to Cluster
+==============================================================
+aws eks update-kubeconfig --name shine-cluster --region ap-south-2
+kubectl get nodes
+
+-- Expected: 2 nodes with STATUS = Ready --
+
+==============================================================
+PHASE 4 — Create Namespaces
+==============================================================
+kubectl create namespace retail
+kubectl create namespace argocd
+kubectl create namespace argo-rollouts
+kubectl get ns
+
+==============================================================
+PHASE 5 — Install ArgoCD
+==============================================================
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=180s
+kubectl get pods -n argocd
+
+-- Wait until all pods show STATUS = Running --
+
+==============================================================
+PHASE 6 — Expose ArgoCD UI
+==============================================================
+kubectl patch svc argocd-server -n argocd -p "{""spec"": {""type"": ""LoadBalancer""}}"
+kubectl get svc -n argocd
+
+-- Copy the EXTERNAL-IP from argocd-server row --
+
+==============================================================
+PHASE 7 — Login to ArgoCD
+==============================================================
+argocd admin initial-password -n argocd
+
+argocd login <PASTE-EXTERNAL-IP-HERE>:80
+-- Username: admin --
+-- Password: (from above command) --
+
+argocd account update-password
+
+==============================================================
+PHASE 8 — Install Argo Rollouts
+==============================================================
+kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+kubectl get pods -n argo-rollouts
+
+==============================================================
+PHASE 9 — Deploy with Helm (run from project root folder)
+==============================================================
+cd "c:\Users\jeeva\Desktop\file\asses\Shine-GitOps-Project"
+helm install retail-release ./Retail-chart
+
+==============================================================
+PHASE 10 — Apply ArgoCD Application
+==============================================================
+kubectl apply -f Retail-chart/templates/argo-application.yml
+
+==============================================================
+PHASE 11 — Verify Everything
+==============================================================
+kubectl get pods -n retail
+kubectl get svc -n retail
+kubectl get rollout -n retail
+argocd app get userprofile-blue-green
+
+-- Expected: --
+--   pods      → STATUS = Running --
+--   svc       → userprofile-active-service has EXTERNAL-IP --
+--   rollout   → STATUS = Healthy --
+--   argocd    → Sync Status = Synced, Health = Healthy --
+
+==============================================================
+ROLLBACK (if needed)
+==============================================================
+kubectl argo rollouts undo userprofile-rollout -n retail
+
+==============================================================
+DELETE CLUSTER (when done / if resetting)
+==============================================================
+eksctl delete cluster --name shine-cluster --region ap-south-2
+==============================================================
